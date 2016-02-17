@@ -662,7 +662,7 @@
     notified = [self.self.myPeripheralManager updateValue:data forCharacteristic:characteristic onSubscribedCentrals:nil];
 
     if (notified){
-      NSLog(@"-updateValue succeeded");
+      // NSLog(@"-updateValue succeeded");
       CDVPluginResult* result;
       NSMutableDictionary *info;
 
@@ -672,7 +672,7 @@
 
       [self.commandDelegate sendPluginResult:result callbackId:command.callbackId];
     } else {
-      NSLog(@"-updateValue postponed");
+      // NSLog(@"-updateValue postponed");
 
       self.notifyData = data;
       self.notifyCallbackId = command.callbackId;
@@ -805,7 +805,7 @@
       CDVPluginResult *result;
       NSMutableDictionary *info;
 
-      NSLog(@"-updateValue retry succeeded");
+      // NSLog(@"-updateValue retry succeeded");
 
       info = [[NSMutableDictionary alloc] init];
       [info setValue:SUCCESS forKey:MES];
@@ -813,10 +813,10 @@
 
       [self.commandDelegate sendPluginResult:result callbackId:self.notifyCallbackId];
     }
-    else
-    {
-      NSLog(@"-updateValue retry failed");
-    }
+    // else
+    // {
+    //   NSLog(@"-updateValue retry failed");
+    // }
 
     self.notifyData = nil;
   }
