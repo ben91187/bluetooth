@@ -41,11 +41,9 @@
 @property (strong, nonatomic) NSMutableDictionary *valueAndCharacteristicDic;
 @property (assign, nonatomic) BOOL isEndOfAddService;
 
-@property (strong, nonatomic) NSData *notifyData;
-@property (strong, nonatomic) NSString *notifyCallbackId;
-@property (strong, nonatomic) CBMutableCharacteristic *notifyCharacteristic;
-
-@property (assign, nonatomic) BOOL isAdvertisingStopped;
+@property (strong, nonatomic) CBCentral *connectedCentral;                  
+@property (strong, nonatomic) NSMutableArray *messageQueue;                 // needed for old style communication
+@property (strong, nonatomic) CBMutableCharacteristic *sendCharacteristic;
 
 - (void)getEnvironment:(CDVInvokedUrlCommand *)command;
 - (void)addEventListener:(CDVInvokedUrlCommand *)command;

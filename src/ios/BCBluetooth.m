@@ -178,11 +178,12 @@
 - (void)pluginInitialize
 {
   [super pluginInitialize];
-
   peripheralAndUUID = [[NSMutableDictionary alloc] init];
+  
+  subscribedCentral = nil;
+  
   isEndOfAddService = FALSE;
   isFindingPeripheral = FALSE;
-  self.isAdvertisingStopped = FALSE;
 
   myPeripheralManager = [[CBPeripheralManager alloc] initWithDelegate:self queue:nil];
   myCentralManager = [[CBCentralManager alloc] initWithDelegate:self queue:nil];
@@ -646,41 +647,121 @@
     }
 }
 
+(void)notifyUntilEmptyOrError
+{
+  BOOL notified;
+  
+  notified = TRUE;
+  
+  while ((TRUE == notified) && (messageQueue.length > 0))
+  {
+    NSData *chunk;
+    NSUInteger max;
+    NSUInteger size;
+    NSMutableData *remainder;
+  
+    remainder = [messageQueue objectAtIndex:0];
+    max = subscribedCentral.maximumUpdateValueLength;
+  
+    while ((TRUE == notified) && (remainder.length > 0))
+    {
+      NSRange range;
+      
+      if (max < remainder.length)
+      {
+        range.location = 0;
+        range.length = size;
+        
+        chunk = [remainder subdataWithRange:range];
+      }
+      
+      notified = [myPeripheralManager updateValue:chunk forCharacteristic:sendCharacteristic onSubscribedCentrals:nil];
+      
+      if (TRUE == notified)
+      {
+        range.location = size;
+        range.length = remainder.length - size;
+        
+        remainder = [[NSMutableData alloc] initWithData: [remainder subdataWithRange:range]];
+        [messageQueue replaceObjectAtIndex:0 withObject: remainder];
+      }
+    }
+    
+    if (remainder.length == 0)
+      [messageQueue removeAtIndex:0];
+  }
+}
+
+// the javascript will send messages that are not split up into chunks, the peer expects that messages are sent in chunks due to
+// the limited mtu; and the peer expects as well that only one message is sent at a time.
+(void)notifyBeforeTIPatch:(CDVInvokedUrlCommand*)command
+{
+  NSString *uniqueID;
+  NSMutableData *data;
+  CDVPluginResult* result;
+  NSMutableDictionary *info;
+  NSString *characteristicIndex;
+
+  info = [[NSMutableDictionary alloc] init];
+  uniqueID = [self getCommandArgument:command.arguments fromKey:UINQUE_ID];
+  characteristicIndex = [self getCommandArgument:command.arguments fromKey:CHARACTERISTIC_INDEX];
+  data = [NSMutableData dataFromBase64String:[self getCommandArgument:command.arguments fromKey:DATA]];
+  sendCharacteristic = [self getNotifyCharacteristic:uniqueID characteristicIndex:characteristicIndex];
+  
+  if (0 < messageQueue.length)
+  {
+    [messageQueue addObject: data];
+    return;
+  }
+  
+  [messageQueue addObject: data];
+  notifyUntilEmptyOrError;
+  
+  [info setValue:SUCCESS forKey:MES];
+  result = [CDVPluginResult resultWithStatus:CDVCommandStatus_OK messageAsDictionary:info];
+  [self.commandDelegate sendPluginResult:result callbackId:command.callbackId];
+}
+
+(void)notifyAfterTIPatch:(CDVInvokedUrlCommand*)command
+{
+  NSString *uniqueID;
+  NSMutableData *data;
+  CDVPluginResult* result;
+  NSMutableDictionary *info;
+  NSString *characteristicIndex;
+
+  info = [[NSMutableDictionary alloc] init];
+  uniqueID = [self getCommandArgument:command.arguments fromKey:UINQUE_ID];
+  data = [NSData dataFromBase64String:[self getCommandArgument:command.arguments fromKey:DATA]];
+  characteristicIndex = [self getCommandArgument:command.arguments fromKey:CHARACTERISTIC_INDEX];
+  sendCharacteristic = [self getNotifyCharacteristic:uniqueID characteristicIndex:characteristicIndex];
+  
+  if (0 < messageQueue.length)
+  {
+    NSMutableData *existing;
+    
+    existing = [messageQueue getObjectAtIndex: 0];
+    [existing appendData: data];
+  }
+  
+  [messageQueue addObject: data];
+  
+  [info setValue:SUCCESS forKey:MES];
+  result = [CDVPluginResult resultWithStatus:CDVCommandStatus_OK messageAsDictionary:info];
+  [self.commandDelegate sendPluginResult:result callbackId:command.callbackId];
+}
+
 - (void)notify:(CDVInvokedUrlCommand*)command {
   if ([self existCommandArguments:command.arguments]) {
-    NSData *data;
-    BOOL notified;
-    NSString *uniqueID;
-    NSString *characteristicIndex;
-    CBMutableCharacteristic *characteristic;
-
-    uniqueID = [self getCommandArgument:command.arguments fromKey:UINQUE_ID];
-    data = [NSData dataFromBase64String:[self getCommandArgument:command.arguments fromKey:DATA]];
-    characteristicIndex = [self getCommandArgument:command.arguments fromKey:CHARACTERISTIC_INDEX];
-    characteristic = [self getNotifyCharacteristic:uniqueID characteristicIndex:characteristicIndex];
-
-    notified = [self.self.myPeripheralManager updateValue:data forCharacteristic:characteristic onSubscribedCentrals:nil];
-
-    if (notified){
-      // NSLog(@"-updateValue succeeded");
-      CDVPluginResult* result;
-      NSMutableDictionary *info;
-
-      info = [[NSMutableDictionary alloc] init];
-      [info setValue:SUCCESS forKey:MES];
-      result = [CDVPluginResult resultWithStatus:CDVCommandStatus_OK messageAsDictionary:info];
-
-      [self.commandDelegate sendPluginResult:result callbackId:command.callbackId];
-    } else {
-      // NSLog(@"-updateValue postponed");
-
-      self.notifyData = data;
-      self.notifyCallbackId = command.callbackId;
-      self.notifyCharacteristic = characteristic;
-    }
-  } else {
-    NSLog(@"-notify was called with insufficient arguments");
+    NSLog(@"'notify' was called with insufficient arguments");
     [self error:command.callbackId];
+    return;
+  }
+  
+  if (subscribedCentral.maximumUpdateValueLength <= 20) {
+    notifyBeforeTIPatch:command;
+  } else {
+    notifyAfterTIPatch:command;
   }
 }
 
@@ -696,11 +777,11 @@
 
   case CBPeripheralManagerStatePoweredOff:
     NSLog(@"****Bluetooth is powered OFF.");
-    if (self.isAdvertisingStopped) {
+    if (nil != subscribedCentral) {
       NSLog(@"Started advertising after Bluetooth coming back on.");
       [self.myPeripheralManager startAdvertising:@{ CBAdvertisementDataLocalNameKey : @"Truma App",
         CBAdvertisementDataServiceUUIDsKey:@[[CBUUID UUIDWithString:@"61808880-b7b3-11e4-b3a4-0002a5d5c51b"]]}];
-      self.isAdvertisingStopped = FALSE;
+      subscribedCentral = nil;
     }
     break;
 
@@ -732,17 +813,18 @@
 
 - (void)peripheralManager:(CBPeripheralManager *)peripheral didAddService:(CBService *)service error:(NSError *)error{
   if (!error) {
-    if (self.isEndOfAddService) {
-      self.isEndOfAddService = FALSE;
-      NSLog(@"Started advertising after adding the services.");
-      [self.myPeripheralManager startAdvertising:@{ CBAdvertisementDataLocalNameKey : @"Truma App",
-        CBAdvertisementDataServiceUUIDsKey:@[[CBUUID UUIDWithString:@"61808880-b7b3-11e4-b3a4-0002a5d5c51b"]]}];
-      self.isAdvertisingStopped = FALSE;
-      CDVPluginResult* result = [CDVPluginResult resultWithStatus:CDVCommandStatus_OK];
-      [self.commandDelegate sendPluginResult:result callbackId:[self.callbacks objectForKey:ADDSERVICE]];
-    }
-  }else{
     CDVPluginResult* result = [CDVPluginResult resultWithStatus:CDVCommandStatus_ERROR];
+    [self.commandDelegate sendPluginResult:result callbackId:[self.callbacks objectForKey:ADDSERVICE]];
+    return;
+  }
+  
+  if (isEndOfAddService) {
+    subscribedCentral = nil;
+    isEndOfAddService = FALSE;
+    NSLog(@"Started advertising after adding the services.");
+    [self.myPeripheralManager startAdvertising:@{ CBAdvertisementDataLocalNameKey : @"Truma App",
+      CBAdvertisementDataServiceUUIDsKey:@[[CBUUID UUIDWithString:@"61808880-b7b3-11e4-b3a4-0002a5d5c51b"]]}];
+    CDVPluginResult* result = [CDVPluginResult resultWithStatus:CDVCommandStatus_OK];
     [self.commandDelegate sendPluginResult:result callbackId:[self.callbacks objectForKey:ADDSERVICE]];
   }
 }
@@ -757,6 +839,8 @@
   CDVPluginResult* result;
   NSMutableDictionary *callbackInfo;
   CBCharacteristic *characteristicNotify;
+  
+  subscribedCentral = central;
 
   characteristicNotify = characteristic;
   service = characteristicNotify.service;
@@ -766,18 +850,20 @@
   // stop advertising
   NSLog(@"Stopped advertising.");
   [peripheral stopAdvertising];
-  self.isAdvertisingStopped = TRUE;
 
   [result setKeepCallbackAsBool:TRUE];
   [self.commandDelegate sendPluginResult:result callbackId:[self.callbacks valueForKey:EVENT_ONSUBSCRIBE]];
 }
 
 - (void)peripheralManager:(CBPeripheralManager *)peripheral central:(CBCentral *)central
-    didUnsubscribeFromCharacteristic:(CBCharacteristic *)characteristic{
+    didUnsubscribeFromCharacteristic:(CBCharacteristic *)characteristic
+{
   CBService *service;
   CDVPluginResult* result;
   NSMutableDictionary *callbackInfo;
   CBCharacteristic *characteristicNotify;
+  
+  subscribedCentral = nil;
 
   characteristicNotify = characteristic;
   service = characteristicNotify.service;
@@ -787,7 +873,6 @@
   NSLog(@"Started advertising.");
   [self.myPeripheralManager startAdvertising:@{ CBAdvertisementDataLocalNameKey : @"Truma App",
     CBAdvertisementDataServiceUUIDsKey:@[[CBUUID UUIDWithString:@"61808880-b7b3-11e4-b3a4-0002a5d5c51b"]]}];
-  self.isAdvertisingStopped = FALSE;
 
   [result setKeepCallbackAsBool:TRUE];
   [self.commandDelegate sendPluginResult:result callbackId:[self.callbacks valueForKey:EVENT_ONUNSUBSCRIBE]];
@@ -795,31 +880,7 @@
 
 - (void)peripheralManagerIsReadyToUpdateSubscribers:(CBPeripheralManager *)peripheral
 {
-  BOOL notified;
-
-  if (self.notifyData)
-  {
-    notified = [peripheral updateValue:self.notifyData forCharacteristic:self.notifyCharacteristic onSubscribedCentrals:nil];
-    if (notified)
-    {
-      CDVPluginResult *result;
-      NSMutableDictionary *info;
-
-      // NSLog(@"-updateValue retry succeeded");
-
-      info = [[NSMutableDictionary alloc] init];
-      [info setValue:SUCCESS forKey:MES];
-      result = [CDVPluginResult resultWithStatus:CDVCommandStatus_OK messageAsDictionary:info];
-
-      [self.commandDelegate sendPluginResult:result callbackId:self.notifyCallbackId];
-    }
-    // else
-    // {
-    //   NSLog(@"-updateValue retry failed");
-    // }
-
-    self.notifyData = nil;
-  }
+  notifyUntilEmptyOrError;
 }
 
 - (void)peripheralManager:(CBPeripheralManager *)peripheral didReceiveReadRequest:(CBATTRequest *)request{
