@@ -180,7 +180,9 @@
   [super pluginInitialize];
   peripheralAndUUID = [[NSMutableDictionary alloc] init];
   
-  subscribedCentral = nil;
+  self.subscribedCentral = nil;
+  self.sendCharacteristic = nil;
+  self.messageQueue = [[NSMutableArray alloc] init];
   
   isEndOfAddService = FALSE;
   isFindingPeripheral = FALSE;
@@ -647,54 +649,50 @@
     }
 }
 
-(void)notifyUntilEmptyOrError
+- (void)notifyUntilEmptyOrError
 {
   BOOL notified;
   
   notified = TRUE;
   
-  while ((TRUE == notified) && (messageQueue.length > 0))
+  while ((TRUE == notified) && (self.messageQueue.count > 0))
   {
     NSData *chunk;
     NSUInteger max;
-    NSUInteger size;
     NSMutableData *remainder;
   
-    remainder = [messageQueue objectAtIndex:0];
-    max = subscribedCentral.maximumUpdateValueLength;
+    remainder = [self.messageQueue objectAtIndex:0];
+    max = self.subscribedCentral.maximumUpdateValueLength;
   
     while ((TRUE == notified) && (remainder.length > 0))
     {
       NSRange range;
+
+      range.location = 0;
+      range.length = (max < remainder.length) ? max : remainder.length;
       
-      if (max < remainder.length)
-      {
-        range.location = 0;
-        range.length = size;
-        
-        chunk = [remainder subdataWithRange:range];
-      }
+      chunk = [remainder subdataWithRange:range];
       
-      notified = [myPeripheralManager updateValue:chunk forCharacteristic:sendCharacteristic onSubscribedCentrals:nil];
+      notified = [myPeripheralManager updateValue:chunk forCharacteristic:self.sendCharacteristic onSubscribedCentrals:nil];
       
       if (TRUE == notified)
       {
-        range.location = size;
-        range.length = remainder.length - size;
+        range.location = range.length;
+        range.length = remainder.length - range.length;
         
         remainder = [[NSMutableData alloc] initWithData: [remainder subdataWithRange:range]];
-        [messageQueue replaceObjectAtIndex:0 withObject: remainder];
+        [self.messageQueue replaceObjectAtIndex:0 withObject: remainder];
       }
     }
     
     if (remainder.length == 0)
-      [messageQueue removeAtIndex:0];
+      [self.messageQueue removeObjectAtIndex:0];
   }
 }
 
 // the javascript will send messages that are not split up into chunks, the peer expects that messages are sent in chunks due to
 // the limited mtu; and the peer expects as well that only one message is sent at a time.
-(void)notifyBeforeTIPatch:(CDVInvokedUrlCommand*)command
+- (void)notifyBeforeTIPatch:(CDVInvokedUrlCommand*)command
 {
   NSString *uniqueID;
   NSMutableData *data;
@@ -705,46 +703,49 @@
   info = [[NSMutableDictionary alloc] init];
   uniqueID = [self getCommandArgument:command.arguments fromKey:UINQUE_ID];
   characteristicIndex = [self getCommandArgument:command.arguments fromKey:CHARACTERISTIC_INDEX];
-  data = [NSMutableData dataFromBase64String:[self getCommandArgument:command.arguments fromKey:DATA]];
-  sendCharacteristic = [self getNotifyCharacteristic:uniqueID characteristicIndex:characteristicIndex];
+  self.sendCharacteristic = [self getNotifyCharacteristic:uniqueID characteristicIndex:characteristicIndex];
+  data = [[NSMutableData alloc] initWithData: [NSData dataFromBase64String:[self getCommandArgument:command.arguments fromKey:DATA]]];
   
-  if (0 < messageQueue.length)
+  if (0 < self.messageQueue.count)
   {
-    [messageQueue addObject: data];
-    return;
+    [self.messageQueue addObject: data];
   }
-  
-  [messageQueue addObject: data];
-  notifyUntilEmptyOrError;
+  else
+  {
+    [self.messageQueue addObject: data];
+    [self notifyUntilEmptyOrError];
+  }
   
   [info setValue:SUCCESS forKey:MES];
   result = [CDVPluginResult resultWithStatus:CDVCommandStatus_OK messageAsDictionary:info];
   [self.commandDelegate sendPluginResult:result callbackId:command.callbackId];
 }
 
-(void)notifyAfterTIPatch:(CDVInvokedUrlCommand*)command
+- (void)notifyAfterTIPatch:(CDVInvokedUrlCommand*)command
 {
   NSString *uniqueID;
   NSMutableData *data;
+  NSMutableData *existing;
   CDVPluginResult* result;
   NSMutableDictionary *info;
   NSString *characteristicIndex;
 
   info = [[NSMutableDictionary alloc] init];
   uniqueID = [self getCommandArgument:command.arguments fromKey:UINQUE_ID];
-  data = [NSData dataFromBase64String:[self getCommandArgument:command.arguments fromKey:DATA]];
   characteristicIndex = [self getCommandArgument:command.arguments fromKey:CHARACTERISTIC_INDEX];
-  sendCharacteristic = [self getNotifyCharacteristic:uniqueID characteristicIndex:characteristicIndex];
+  self.sendCharacteristic = [self getNotifyCharacteristic:uniqueID characteristicIndex:characteristicIndex];
+  data = [[NSMutableData alloc] initWithData: [NSData dataFromBase64String:[self getCommandArgument:command.arguments fromKey:DATA]]];
   
-  if (0 < messageQueue.length)
+  if (0 < self.messageQueue.count)
   {
-    NSMutableData *existing;
-    
-    existing = [messageQueue getObjectAtIndex: 0];
+    existing = [self.messageQueue objectAtIndex: 0];
     [existing appendData: data];
   }
-  
-  [messageQueue addObject: data];
+  else
+  {
+    [self.messageQueue addObject:data];
+    [self notifyUntilEmptyOrError];
+  }
   
   [info setValue:SUCCESS forKey:MES];
   result = [CDVPluginResult resultWithStatus:CDVCommandStatus_OK messageAsDictionary:info];
@@ -752,16 +753,16 @@
 }
 
 - (void)notify:(CDVInvokedUrlCommand*)command {
-  if ([self existCommandArguments:command.arguments]) {
+  if (![self existCommandArguments:command.arguments]) {
     NSLog(@"'notify' was called with insufficient arguments");
     [self error:command.callbackId];
     return;
   }
   
-  if (subscribedCentral.maximumUpdateValueLength <= 20) {
-    notifyBeforeTIPatch:command;
+  if (self.subscribedCentral.maximumUpdateValueLength <= 20) {
+    [self notifyBeforeTIPatch: command];
   } else {
-    notifyAfterTIPatch:command;
+    [self notifyAfterTIPatch: command];
   }
 }
 
@@ -777,11 +778,13 @@
 
   case CBPeripheralManagerStatePoweredOff:
     NSLog(@"****Bluetooth is powered OFF.");
-    if (nil != subscribedCentral) {
+    if (nil != self.subscribedCentral) {
       NSLog(@"Started advertising after Bluetooth coming back on.");
       [self.myPeripheralManager startAdvertising:@{ CBAdvertisementDataLocalNameKey : @"Truma App",
         CBAdvertisementDataServiceUUIDsKey:@[[CBUUID UUIDWithString:@"61808880-b7b3-11e4-b3a4-0002a5d5c51b"]]}];
-      subscribedCentral = nil;
+
+      self.subscribedCentral = nil;
+      self.messageQueue = [[NSMutableArray alloc] init];
     }
     break;
 
@@ -812,14 +815,16 @@
 }
 
 - (void)peripheralManager:(CBPeripheralManager *)peripheral didAddService:(CBService *)service error:(NSError *)error{
-  if (!error) {
+  if (nil != error) {
     CDVPluginResult* result = [CDVPluginResult resultWithStatus:CDVCommandStatus_ERROR];
     [self.commandDelegate sendPluginResult:result callbackId:[self.callbacks objectForKey:ADDSERVICE]];
     return;
   }
   
   if (isEndOfAddService) {
-    subscribedCentral = nil;
+    self.subscribedCentral = nil;
+    self.messageQueue = [[NSMutableArray alloc] init];
+    
     isEndOfAddService = FALSE;
     NSLog(@"Started advertising after adding the services.");
     [self.myPeripheralManager startAdvertising:@{ CBAdvertisementDataLocalNameKey : @"Truma App",
@@ -840,7 +845,7 @@
   NSMutableDictionary *callbackInfo;
   CBCharacteristic *characteristicNotify;
   
-  subscribedCentral = central;
+  self.subscribedCentral = central;
 
   characteristicNotify = characteristic;
   service = characteristicNotify.service;
@@ -863,12 +868,13 @@
   NSMutableDictionary *callbackInfo;
   CBCharacteristic *characteristicNotify;
   
-  subscribedCentral = nil;
+  self.subscribedCentral = nil;
+  self.messageQueue = [[NSMutableArray alloc] init];
 
   characteristicNotify = characteristic;
   service = characteristicNotify.service;
-  result = [CDVPluginResult resultWithStatus:CDVCommandStatus_OK messageAsDictionary:callbackInfo];
   callbackInfo = [self getUniqueIDWithService:service andCharacteristicIndex:characteristicNotify];
+  result = [CDVPluginResult resultWithStatus:CDVCommandStatus_OK messageAsDictionary:callbackInfo];
 
   NSLog(@"Started advertising.");
   [self.myPeripheralManager startAdvertising:@{ CBAdvertisementDataLocalNameKey : @"Truma App",
@@ -880,7 +886,7 @@
 
 - (void)peripheralManagerIsReadyToUpdateSubscribers:(CBPeripheralManager *)peripheral
 {
-  notifyUntilEmptyOrError;
+  [self notifyUntilEmptyOrError];
 }
 
 - (void)peripheralManager:(CBPeripheralManager *)peripheral didReceiveReadRequest:(CBATTRequest *)request{
@@ -1075,7 +1081,7 @@
                     (CBCharacteristic *)characteristic error:(NSError *)error {
     BCLOG_FUNC(GATT_MODUAL)
     NSString *deviceAddress = [self getPeripheralUUID:peripheral];
-    if (!error) {
+    if (nil == error) {
         NSMutableDictionary *callbackInfo = [self storeDescriptorInfo:peripheral characteristic:characteristic];
         CDVPluginResult* result = [CDVPluginResult resultWithStatus:CDVCommandStatus_OK messageAsDictionary:callbackInfo];
         [self.commandDelegate sendPluginResult:result callbackId:[self.callbacks objectForKey:
@@ -1742,11 +1748,11 @@
         NSString *asciiString;
         if (valueString.length <= 16) {
             result = [[NSMutableString alloc] initWithString:valueString];
-            for (int i = 0; i < valueString.length / 2; i++) {
+            for (NSUInteger i = 0; i < valueString.length / 2; i++) {
                 [result insertString:@" " atIndex:2 + 2 * i + i];
             }
             asciiString = [self getAsciiString:valueByte infoDataLength:valueString.length / 2 byteIndex:j * 8];
-            for (int k = 0; k < 8 - valueString.length / 2; k++) {
+            for (NSUInteger k = 0; k < 8 - valueString.length / 2; k++) {
                 asciiString = [@"     " stringByAppendingString:asciiString];
             }
             j++;
@@ -1755,7 +1761,7 @@
             NSString *subString = [valueString substringToIndex:16];
             result = [[NSMutableString alloc] initWithString:subString];
             valueString = [valueString substringFromIndex:16];
-            for (int i = 0; i < subString.length / 2; i++) {
+            for (NSUInteger i = 0; i < subString.length / 2; i++) {
                 [result insertString:@" " atIndex:2 + 2 * i + i];
             }
             asciiString = [self getAsciiString:valueByte infoDataLength:8 byteIndex:j * 8];

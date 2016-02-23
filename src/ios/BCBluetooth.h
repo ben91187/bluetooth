@@ -41,8 +41,8 @@
 @property (strong, nonatomic) NSMutableDictionary *valueAndCharacteristicDic;
 @property (assign, nonatomic) BOOL isEndOfAddService;
 
-@property (strong, nonatomic) CBCentral *connectedCentral;                  
-@property (strong, nonatomic) NSMutableArray *messageQueue;                 // needed for old style communication
+@property (strong, nonatomic) CBCentral *subscribedCentral;
+@property (strong, nonatomic) NSMutableArray *messageQueue;
 @property (strong, nonatomic) CBMutableCharacteristic *sendCharacteristic;
 
 - (void)getEnvironment:(CDVInvokedUrlCommand *)command;
